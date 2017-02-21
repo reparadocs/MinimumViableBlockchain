@@ -24,7 +24,7 @@ def signal(signal_id):
 def all():
   s = ""
   for signal in all_signals:
-    s += signal + "\n"
+    s += signal + "<br/><br/><br/>"
   return s
 
 if __name__ == "__main__":

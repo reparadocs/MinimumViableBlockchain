@@ -5,11 +5,12 @@ import hashlib
 import threading
 import requests
 import time
+import random
 
 REQUEST_URL = "http://localhost:5000/signals"
 REQUEST_URL_SIGNAL = "http://localhost:5000/signal/"
 
-PROOF_OF_WORK = 2
+PROOF_OF_WORK = 4
 PROOF_OF_WORK_PREFIX = "0" * PROOF_OF_WORK
 # How do we know how much each participant has without traversing the entire blockchain?
 # How do offline participants get the blockchain?
@@ -56,6 +57,7 @@ class BlockchainClient:
     if head == self.current_head:
       message = {"type":"block", "content": block.to_dict()}
       signal(json.dumps(message))
+      print "I MINED IT " + block.hash
 
   def block_signal(self, block):
     block = Block(block["transaction"], block["previous"], block["nonce"], block["hash"])
@@ -102,7 +104,7 @@ class Block:
       if p_hash[:PROOF_OF_WORK] == PROOF_OF_WORK_PREFIX:
         self.hash = p_hash
         break
-      self.nonce += 1
+      self.nonce += random.randint(1,100)
 
 def get_signal(bk, signal_id):
   r = requests.get(REQUEST_URL_SIGNAL + str(signal_id))
@@ -128,6 +130,7 @@ def main():
       t = threading.Thread(target=get_signal, args=(bk, last_signal,))
       t.start()
       last_signal += 1
+    print bk.current_head
     time.sleep(1)
 
 main()
