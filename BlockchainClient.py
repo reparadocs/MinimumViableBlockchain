@@ -74,6 +74,9 @@ class Block:
     self.nonce = nonce
     self.hash = v_hash
 
+  def __repr__(self):
+    return str(self.to_dict())
+
   def to_dict(self):
     return {"transaction": self.transaction, "previous": self.previous, "nonce": self.nonce, "hash": self.hash}
 
@@ -119,10 +122,22 @@ def get_signal(bk, signal_id):
   elif d["type"] == "transaction":
     bk.transaction_signal(d["content"])
 
+def input_transaction(bk):
+  while True:
+    do = int(raw_input("1 for new transaction, 2 for blockchain dump"))
+    if do == 1:
+      amount = int(raw_input("How much do you want to send?"))
+      receiver = raw_input("Where do you want to send it?")
+      bk.create_transaction(receiver, amount)
+    elif do == 2:
+      print bk.blockchain
+
 def main():
   bk = BlockchainClient()
   last_signal = 0
   print bk.address
+  t = threading.Thread(target=input_transaction, args=(bk,))
+  t.start()
   while True:
     r = requests.get(REQUEST_URL)
     s_l = int(r.text)
@@ -130,7 +145,6 @@ def main():
       t = threading.Thread(target=get_signal, args=(bk, last_signal,))
       t.start()
       last_signal += 1
-    print bk.current_head
     time.sleep(1)
 
 main()
