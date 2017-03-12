@@ -4,11 +4,10 @@ import json
 import hashlib
 import threading
 import requests
+from threading import RLock
+
 import time
 import random
-
-REQUEST_URL = "http://localhost:5000/signals"
-REQUEST_URL_SIGNAL = "http://localhost:5000/signal/"
 
 PROOF_OF_WORK = 4
 PROOF_OF_WORK_PREFIX = "0" * PROOF_OF_WORK
@@ -26,19 +25,54 @@ def validate_transaction(signed_transaction):
   transaction_dump = json.dumps(transaction)
   return s_vk.verify(signature, transaction_dump)
 
+def validate_transactions(transactions):
+  for transaction in transactions:
+    if not validate_transaction(transaction):
+      print transaction
+      return False
+  return True
+
 class BlockchainClient:
-  def __init__(self):
+  def __init__(self, address):
     self.sk = SigningKey.generate()
     self.vk = self.sk.get_verifying_key()
     self.address = binascii.hexlify(self.vk.to_string())
     self.blockchain = []
     self.current_head = "0"
+    self.clients = [address,]
+    self.transaction_pool = []
+    self.poollock = RLock()
+    self.chainlock = RLock()
 
-  def create_transaction(self, receiver, amount):
+  def add_client(self, client):
+    self.clients.append(client)
+    client_blockchain = self.get_client_blockchain(client)
+    if len(client_blockchain) <= len(self.blockchain):
+      return
+    if len(client_blockchain) > len(self.blockchain):
+      inflated_cb = []
+      for block in client_blockchain:
+        i_block = Block(block["transaction"], block["previous"], self, block["nonce"], block["hash"])
+        inflated_cb.append(i_block)
+        if not i_block.validate():
+          return
+      if len(inflated_cb) > len(self.blockchain):
+        with self.chainlock:
+          self.blockchain = inflated_cb
+
+  def get_client_blockchain(self, client):
+    return json.loads(requests.get(client + '/blocks').text);
+
+  def notify_clients(self, endpoint, data):
+    for client in self.clients:
+      requests.post(client + endpoint, data=data)
+
+  def create_transaction(self, receiver, amount, fee=0.1):
     transaction = {
       "sender": self.address,
       "receiver": receiver,
       "amount": amount,
+      "fee": fee,
     }
     transaction_dump = json.dumps(transaction)
     sig = self.sk.sign(transaction_dump)
@@ -46,105 +80,74 @@ class BlockchainClient:
       "signature": binascii.hexlify(sig),
       "transaction": transaction,
     }
-    message = {"type":"transaction", "content": signed_transaction}
-    signal(json.dumps(message))
+    self.notify_clients('/new_transaction', {'transaction': json.dumps(signed_transaction)})
+    return
 
   def transaction_signal(self, signed_transaction):
-    head = self.current_head
-    signature = signed_transaction["signature"]
-    block = Block(signed_transaction, head)
-    block.mine()
-    if head == self.current_head:
-      message = {"type":"block", "content": block.to_dict()}
-      signal(json.dumps(message))
-      print "I MINED IT " + block.hash
+    with self.poollock:
+      self.transaction_pool.append(json.loads(signed_transaction))
 
   def block_signal(self, block):
-    block = Block(block["transaction"], block["previous"], block["nonce"], block["hash"])
+    # TODO: remove transactions from transaction pool
+    block = json.loads(block)
+    block = Block(block["transactions"], block["previous"], self, block["nonce"], block["hash"])
     if block.validate() and block.previous == self.current_head:
       self.current_head = block.hash
-      self.blockchain.append(block)
+      with self.chainlock:
+        self.blockchain.append(block)
     else:
       raise Exception
 
+  def run_client(self):
+    prev_pool = None
+    while True:
+      if len(self.transaction_pool) != 0:
+        if prev_pool != self.transaction_pool:
+          if validate_transactions(self.transaction_pool):
+            prev_pool = self.transaction_pool
+            block = Block(self.transaction_pool, self.current_head, self)
+          else:
+            raise Exception
+        if block.hash_cycle():
+          self.notify_clients('/new_block', {'block': json.dumps(block.to_dict())})
+          print "I MINED IT " + block.hash
+          self.transaction_pool = [] # VERY HACKY SOLUTION FIND A BETTER ONE
+
 class Block:
-  def __init__(self, transaction, previous, nonce=0, v_hash=""):
-    self.transaction = transaction
+  def __init__(self, transactions, previous, blockchain, nonce=0, v_hash=""):
+    self.transactions = transactions
     self.previous = str(previous)
     self.nonce = nonce
     self.hash = v_hash
+    self.blockchain = blockchain
 
   def __repr__(self):
     return str(self.to_dict())
 
-  def to_dict(self):
-    return {"transaction": self.transaction, "previous": self.previous, "nonce": self.nonce, "hash": self.hash}
-
-  def validate(self):
-    if self.hash[:PROOF_OF_WORK] != PROOF_OF_WORK_PREFIX:
-      return False
-    block = {
-      "transaction": self.transaction,
+  def serialize(self, include_hash=False):
+    d = {
+      "transactions": self.transactions,
       "previous": self.previous,
       "nonce": self.nonce
     }
-    return hashlib.sha256(json.dumps(block)).hexdigest() == self.hash
+    if include_hash:
+      d["hash"] = self.hash 
+    return d
 
-  def mine(self):
-    if validate_transaction(self.transaction):
-      self.find_hash()
-    else:
-      raise Exception
+  def to_dict(self):
+    return self.serialize(True)
 
-  def find_hash(self):
-    while True:
-      block = {
-        "transaction": self.transaction,
-        "previous": self.previous,
-        "nonce": self.nonce
-      }
-      p_hash = hashlib.sha256(json.dumps(block)).hexdigest()
-      if p_hash[:PROOF_OF_WORK] == PROOF_OF_WORK_PREFIX:
-        self.hash = p_hash
-        break
-      self.nonce += random.randint(1,100)
+  def validate(self):
+    if not validate_transactions(self.transactions):
+      return False
+    if self.hash[:PROOF_OF_WORK] != PROOF_OF_WORK_PREFIX:
+      return False
+    return hashlib.sha256(json.dumps(self.serialize())).hexdigest() == self.hash
 
-def get_signal(bk, signal_id):
-  r = requests.get(REQUEST_URL_SIGNAL + str(signal_id))
-  d = json.loads(r.text)
-  print "received " + d["type"] + " signal"
-  if d["type"] == "manual":
-    if d["address"] == bk.address:
-      bk.create_transaction(d["receiver"], int(d["amount"]))
-      return
-  if d["type"] == "block":
-    bk.block_signal(d["content"])
-  elif d["type"] == "transaction":
-    bk.transaction_signal(d["content"])
-
-def input_transaction(bk):
-  while True:
-    do = int(raw_input("1 for new transaction, 2 for blockchain dump"))
-    if do == 1:
-      amount = int(raw_input("How much do you want to send?"))
-      receiver = raw_input("Where do you want to send it?")
-      bk.create_transaction(receiver, amount)
-    elif do == 2:
-      print bk.blockchain
-
-def main():
-  bk = BlockchainClient()
-  last_signal = 0
-  print bk.address
-  t = threading.Thread(target=input_transaction, args=(bk,))
-  t.start()
-  while True:
-    r = requests.get(REQUEST_URL)
-    s_l = int(r.text)
-    while last_signal < s_l:
-      t = threading.Thread(target=get_signal, args=(bk, last_signal,))
-      t.start()
-      last_signal += 1
-    time.sleep(1)
-
-main()
+  def hash_cycle(self):
+    p_hash = hashlib.sha256(json.dumps(self.serialize())).hexdigest()
+    if p_hash[:PROOF_OF_WORK] == PROOF_OF_WORK_PREFIX:
+      self.hash = p_hash
+      return True
+    self.nonce += random.randint(1,100)
+    return False
