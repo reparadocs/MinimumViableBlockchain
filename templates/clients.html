@@ -11,12 +11,10 @@
   </dd>
 {% endmacro %}
 
-<h5>{{address}}</h5>
-<h3>Amount: {{amount}}</h3>
-<form method=post action="/create_transaction">
+<h4>{{clients}}</h4>
+<form method=post action="/add_client">
   <dl>
-    {{ render_field(form.receiver) }}
-    {{ render_field(form.amount) }}
+    {{ render_field(form.client) }}
     {{ render_field(form.submit) }}
   </dl>
 </form>
